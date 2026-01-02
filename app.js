@@ -1,16 +1,151 @@
 import express from "express";
+import session from "express-session";
 import cors from "cors";
 import dotenv from "dotenv";
 import OpenAI from "openai";
+import fetch from "node-fetch";
 
 dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+/* ---------- SESSION MUST LOAD BEFORE ROUTES ---------- */
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: true,
+  })
+);
+
 const PORT = process.env.PORT || 4000;
 
+const CLIENT_ID = process.env.LINKEDIN_CLIENT_ID;
+const CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET;
+const REDIRECT_URI = process.env.LINKEDIN_REDIRECT_URI;
+
+console.log("REDIRECT URI:", REDIRECT_URI);
+
 console.log("API key loaded:", !!process.env.OPENAI_API_KEY);
+
+/* ------------------------------------------------------
+   LINKEDIN OAUTH — LOGIN → CONSENT SCREEN
+------------------------------------------------------- */
+
+app.get("/auth/linkedin", (req, res) => {
+  const authUrl = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(
+    REDIRECT_URI
+  )}&scope=w_member_social`;
+
+  res.redirect(authUrl);
+});
+
+/* ------------------------------------------------------
+   LINKEDIN OAUTH — CALLBACK → GET ACCESS TOKEN
+------------------------------------------------------- */
+
+app.get("/auth/linkedin/callback", async (req, res) => {
+  const { code, error, error_description } = req.query;
+
+  console.log("OAuth callback query:", req.query);
+
+  if (error) {
+    console.error("LinkedIn returned error:", error, error_description);
+    return res.status(400).send(error_description);
+  }
+
+  try {
+    console.log("Exchanging code for token...");
+
+    const tokenRes = await fetch(
+      "https://www.linkedin.com/oauth/v2/accessToken",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: REDIRECT_URI,
+          client_id: CLIENT_ID,
+          client_secret: CLIENT_SECRET,
+        }),
+      }
+    );
+
+    const data = await tokenRes.json();
+
+    console.log("Token exchange result:", data);
+
+    if (data.error) throw new Error(data.error_description);
+
+    req.session.linkedinAccessToken = data.access_token;
+    await req.session.save();
+
+    res.send("LinkedIn connected successfully. You can now post.");
+  } catch (err) {
+    console.error("OAuth exchange failed:", err);
+    res.status(500).send("OAuth failed");
+  }
+});
+
+/* ------------------------------------------------------
+   POST TO LINKEDIN USING SESSION TOKEN
+------------------------------------------------------- */
+
+app.post("/api/linkedin-post", async (req, res) => {
+  const { text } = req.body;
+  const token = req.session.linkedinAccessToken;
+
+  if (!token) {
+    return res
+      .status(401)
+      .json({ error: "Not authorized — connect LinkedIn first." });
+  }
+
+  try {
+    // Get LinkedIn profile id
+    const me = await fetch("https://api.linkedin.com/v2/me", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const profile = await me.json();
+
+    const payload = {
+      author: `urn:li:person:${profile.id}`,
+      lifecycleState: "PUBLISHED",
+      specificContent: {
+        "com.linkedin.ugc.ShareContent": {
+          shareCommentary: { text },
+          shareMediaCategory: "NONE",
+        },
+      },
+      visibility: {
+        "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC",
+      },
+    };
+
+    const response = await fetch("https://api.linkedin.com/v2/ugcPosts", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) throw new Error(await response.text());
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ------------------------------------------------------
+   OPENAI ENDPOINT
+------------------------------------------------------- */
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -23,26 +158,31 @@ app.post("/api/ask", async (req, res) => {
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
-        { role: "system", content: "You are a helpful assistant." },
+        {
+          role: "system",
+          content: `You are an expert Product Manager assistant...
+
+RULES:
+- Begin answers directly with the content.
+- Do NOT say "Certainly", "Here are", etc.
+- No closing filler text.
+- No follow-up questions.`,
+        },
         { role: "user", content: message },
       ],
     });
 
-    res.json({
-      reply: completion.choices[0].message.content,
-    });
+    res.json({ reply: completion.choices[0].message.content });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong." });
   }
 });
 
-try {
-  app.listen(PORT, () =>
-    console.log(`API running on http://localhost:${PORT}`)
-  );
-} catch (err) {
-  console.error("LISTEN FAILED", err);
-}
+/* ------------------------------------------------------
+   START SERVER
+------------------------------------------------------- */
+
+app.listen(PORT, () => console.log(`API running on http://localhost:${PORT}`));
 
 console.log("PID:", process.pid);
