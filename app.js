@@ -8,7 +8,18 @@ import fetch from "node-fetch";
 dotenv.config();
 
 const app = express();
-app.use(cors());
+
+const PORT = process.env.PORT || 4000;
+const CLIENT_ID = process.env.LINKEDIN_CLIENT_ID;
+const CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET;
+const REDIRECT_URI = process.env.LINKEDIN_REDIRECT_URI;
+
+app.use(
+  cors({
+    origin: "http://localhost:3003",
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 /* ---------- SESSION MUST LOAD BEFORE ROUTES ---------- */
@@ -16,15 +27,14 @@ app.use(
   session({
     secret: process.env.SESSION_SECRET,
     resave: false,
-    saveUninitialized: true,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax", // allow localhost:3003 → 4000
+      secure: false, // MUST be false for http://
+    },
   })
 );
-
-const PORT = process.env.PORT || 4000;
-
-const CLIENT_ID = process.env.LINKEDIN_CLIENT_ID;
-const CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET;
-const REDIRECT_URI = process.env.LINKEDIN_REDIRECT_URI;
 
 console.log("REDIRECT URI:", REDIRECT_URI);
 
@@ -37,7 +47,7 @@ console.log("API key loaded:", !!process.env.OPENAI_API_KEY);
 app.get("/auth/linkedin", (req, res) => {
   const authUrl = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(
     REDIRECT_URI
-  )}&scope=w_member_social`;
+  )}&scope=openid%20profile%20w_member_social`;
 
   res.redirect(authUrl);
 });
@@ -97,6 +107,7 @@ app.get("/auth/linkedin/callback", async (req, res) => {
 app.post("/api/linkedin-post", async (req, res) => {
   const { text } = req.body;
   const token = req.session.linkedinAccessToken;
+  console.log("SESSION TOKEN >>>", req.session.linkedinAccessToken);
 
   if (!token) {
     return res
@@ -106,14 +117,15 @@ app.post("/api/linkedin-post", async (req, res) => {
 
   try {
     // Get LinkedIn profile id
-    const me = await fetch("https://api.linkedin.com/v2/me", {
+    const me = await fetch("https://api.linkedin.com/v2/userinfo", {
       headers: { Authorization: `Bearer ${token}` },
     });
 
     const profile = await me.json();
+    console.log("USERINFO RESPONSE >>>", profile);
 
     const payload = {
-      author: `urn:li:person:${profile.id}`,
+      author: `urn:li:person:${profile.sub}`,
       lifecycleState: "PUBLISHED",
       specificContent: {
         "com.linkedin.ugc.ShareContent": {
@@ -131,6 +143,7 @@ app.post("/api/linkedin-post", async (req, res) => {
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
+        "X-Restli-Protocol-Version": "2.0.0",
       },
       body: JSON.stringify(payload),
     });
