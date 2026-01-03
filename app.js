@@ -16,7 +16,7 @@ const REDIRECT_URI = process.env.LINKEDIN_REDIRECT_URI;
 
 app.use(
   cors({
-    origin: "http://localhost:3003",
+    origin: "http://localhost:3000",
     credentials: true,
   })
 );
@@ -93,7 +93,44 @@ app.get("/auth/linkedin/callback", async (req, res) => {
     req.session.linkedinAccessToken = data.access_token;
     await req.session.save();
 
-    res.send("LinkedIn connected successfully. You can now post.");
+    res.send(`
+  <!DOCTYPE html>
+  <html>
+    <head>
+      <title>LinkedIn Connected</title>
+      <meta charset="utf-8" />
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 100vh;
+          margin: 0;
+        }
+        .box {
+          padding: 24px 32px;
+          border-radius: 10px;
+          border: 1px solid #ddd;
+          box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+        }
+      </style>
+
+      <script>
+        setTimeout(() => {
+          window.location.href = "http://localhost:3000";
+        }, 3000);
+      </script>
+    </head>
+
+    <body>
+      <div class="box">
+        <h2>LinkedIn connected successfully</h2>
+        <p>You’ll be redirected shortly…</p>
+      </div>
+    </body>
+  </html>
+`);
   } catch (err) {
     console.error("OAuth exchange failed:", err);
     res.status(500).send("OAuth failed");
